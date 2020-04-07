@@ -31,7 +31,8 @@ class AssetNotFound(BaseAssetException):
 
 
 class IntegrityError(BaseAssetException):
-    DEFAULT_MESSAGE = 'Could not validate file integrity hash. Check whether the file is corrupt or the manifest file is out of date.'
+    DEFAULT_MESSAGE = 'Could not validate file integrity hash. ' \
+                      'Check whether the file is corrupt or the manifest file is out of date.'
 
 
 class AssetAlreadyExists(BaseAssetException):

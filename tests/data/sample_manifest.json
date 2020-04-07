@@ -1,0 +1,16 @@
+{
+  "collections": [],
+  "items": [
+    {
+      "_date": "2020-03-15",
+      "_type": "sample_file",
+      "_label": "A sample file",
+      "_path": "sample_file.txt",
+      "_sha256": "c87e2ca771bab6024c269b933389d2a92d4941c848c52f155b9b84e1f109fe35",
+      "_size": 20,
+      "meta": "a text file",
+      "mytag": "GRCh37"
+    }
+  ],
+  "schema_version": 1
+}

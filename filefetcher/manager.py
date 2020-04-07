@@ -1,155 +1,116 @@
 """
 Manager class: responsible for finding, downloading, or building assets as appropriate
 """
+import abc
+import functools
+import logging
 import os
 import re
+import tempfile
 import typing as ty
 import urllib.request
 
 from . import exceptions, manifest, util
 
 
-# class AssetCLI:
-#     def __init__(self, manager):
-#         self._manager = manager  # type: AssetManager
-#
-#     def parse_args(self):
-#         def add_common(subparser):
-#             group = subparser.add_mutually_exclusive_group()
-#
-#             group.add_argument('--all', help='Apply this action for all assets in manifest', action='store_true')
-#             group.add_argument('--id', help='Apply this action for a specific record ID', action='store_true')
-#
-#             subparser.add_argument('--tag', nargs=2, action='append',
-#                                    help="Tag attributes with metadata for the desired item")
-#
-#         parser = argparse.ArgumentParser(description="Manage and download assets for {}".format(self._manager.name))
-#         # FIXME: currently CLI injects a manager class instance; how can we make local/remote configurable in this pattern?
-#         parser.add_argument('--local', help='Base path for the local cache directory')
-#         parser.add_argument('--remote', help='Base URL for downloading pre-built assets')
-#         parser.add_argument('-y', help='Automatic yes to prompts; run non-interactively')
-#
-#         subparsers = parser.add_subparsers(dest='cmd', help='Several sub-commands are available')
-#
-#         show_parser = subparsers.add_parser('show', help='Show information about assets in local cache')
-#         add_common(show_parser)
-#         show_parser.set_defaults(func=self.show_command)
-#
-#         download_parser = subparsers.add_parser('download', help='Download the specified assets (pre-built)')
-#         add_common(download_parser)
-#         download_parser.set_defaults(func=self.download_command)
-#
-#         build_parser = subparsers.add_parser('build', help='Build the specified assets from a recipe')
-#         add_common(build_parser)
-#         build_parser.set_defaults(func=self.build_command)
-#
-#
-#     def _validate_common(self, args):
-#         n_tags = len(args.tags)
-#         if args.all and n_tags:
-#             sys.exit('Options "--all" and "--tags" are mutually exclusive')
-#
-#         if not args.all and not n_tags:
-#             sys.exit('Must specify at least one asset')
-#
-#
-#     # TODO: Can we use show/download/build as 'func'? Does it receive a reference to self already?
-#     def show_command(self, args):
-#         # TODO: Implement
-#         self._validate_common(args)
-#
-#         if args.all:
-#             records = self._manager._local._items
-#         else:
-#             tags = dict(args.tags)
-#             records = [self._manager.locate(args.id, **item) for item in tags]
-#
-#         # TODO: Most of these CLI features will be nicer to use once "collections" have been implemented
-#
-#     def download_command(self, args):
-#         # TODO: Implement
-#         self._validate_common(args)
-#
-#     def build_command(self, args):
-#         # TODO: implement
-#         self._validate_common(args)
+logger = logging.getLogger(__name__)
+
+
+class BuildTask(abc.ABC):
+    """A build task (recipe) can be any callable, but this provides machinery for some common operations"""
+    def check_existing(self, manager, item_type, **kwargs):
+        """
+        Cancel build of this asset if it already exists
+
+        This means that the build step can be run on a cron job regularly, incrementally building new files when source
+            data is updated
+        """
+        try:
+            # Cancel the build step if the asset already exists. This is not very ergonomic, but hey.
+            manager.locate(item_type, auto_build=False, auto_fetch=False, **kwargs)
+            logger.debug('Skipping build step for asset {} because asset already exists'.format(item_type))
+            raise exceptions.AssetAlreadyExists
+        except exceptions.NoMatchingAsset:
+            return True
+
+    @abc.abstractmethod
+    def build(self, manager: 'AssetManager', item_type: str, build_folder: str, **kwargs) -> ty.Tuple[str, dict]:
+        """Perform the actual build step, resulting in an output file and metadata"""
+        pass
+
+    def __call__(self, manager: 'AssetManager', item_type: str, build_folder: str, **kwargs) -> ty.Tuple[str, dict]:
+        """
+        Perform all operations required to build an asset (this class may be expanded in the future)
+
+        :param manager: The manager instance that is performing the build. Can be used to check if assets already exist
+        :param item_type: The type of asset (eg `snp_to_rsid`)
+        :param build_folder: A temp folder that is automatically created during the build process for use by this
+            build task. This folder and its contents will automatically be removed when the build completes; this may
+            or may not be the desired behavior for you.
+        :param kwargs: Custom tags that can be used to further define the asset (eg `genome_build`)
+        :return:
+        """
+        self.check_existing(manager, item_type, **kwargs)
+        return self.build(manager, item_type, build_folder, **kwargs)
 
 
 class AssetManager:
     """Locate, download, or build assets as appropriate"""
-    def __init__(self, name, remote_url, cache_dir=None, auto_fetch=False, auto_build=False):
-        user_path = '~/.assets/{}'.format(re.sub(r'[^\w\d-]','_', name))
-        cache_dir = cache_dir or os.environ.get(name + '_ASSETS_DIR') or user_path
-        self._cache_dir = cache_dir
+    def __init__(self, library_name: str, remote_url: str, local_manifest: str = None, *,
+                 auto_fetch: bool = False, auto_build: bool = False,
+                 # Whether to autoload the local manifest (useful for testing to avoid blank files)
+                 auto_load: bool = True):
+        self.name = library_name
+
+        if not local_manifest:
+            # By default, package assets will be stored in `/<filefetcher_cache/mypackage`. The <filefetcher_cache>
+            #   folder may be specified as an environment variable, OR a suggested default location.
+            library_as_folder_name = re.sub(r'[^\w\d]', '_', library_name)
+            env_var_override = '{}_ASSETS_DIR'.format(library_as_folder_name.upper())
+
+            base_cache_dir = os.environ.get(env_var_override) or util.get_default_asset_dir()
+            local_manifest = os.path.join(base_cache_dir, library_as_folder_name, 'manifest.json')
+
+        package_cache_dir = os.path.dirname(local_manifest)
 
         # Identify places to fetch pre-build assets
-        self._local = manifest.LocalManifest(cache_dir)
+        self._local = manifest.LocalManifest(local_manifest)
         self._remote = manifest.RemoteManifest(remote_url)
 
         # Store information about any relevant build scripts that can be used to make manifest items
-        self._recipes = manifest.RecipeManifest(cache_dir)
+        self._recipes = manifest.RecipeManifest(local_manifest)
 
         self._auto_fetch = auto_fetch
         self._auto_build = auto_build
 
-        # Ensure that the local asset directory exists for all future checks
-        if not os.path.isdir(cache_dir):
-            os.makedirs(cache_dir)
-
         # Load the manifest files into memory (creating if needed)
+        if auto_load:
+            # Ensure that the local asset directory exists for all future checks
+            if not os.path.isdir(package_cache_dir):
+                os.makedirs(package_cache_dir)
+            self._local.load()
+        self._recipes.load()
+
+    def set_local_manifest(self, manifest_path: str):
+        """
+        Change the manifest path used to track local assets. This is useful for, eg, CLI functionality
+        """
+        self._local = manifest.LocalManifest(manifest_path)
         self._local.load()
+        self.locate.cache_clear()
 
-    def locate(self, item_id, **kwargs) -> str:
+    def set_remote_manifest(self, manifest_path: str):
         """
-        Find an asset in the local store, and optionally, try to auto-download it
-
-        Return the (local) path to the asset at the end of this process
+        Change the manifest path used to track remote assets. This is useful for, eg, CLI functionality
+        We don't download the remote manifest until it is actually needed, but we do clear the cache.
         """
-        try:
-            data = self._local.locate(item_id, **kwargs)
-            return self._local.get_path(data)
-        except (exceptions.NoMatchingAsset, exceptions.ManifestNotFound) as e:
-            if not self._auto_fetch or self._auto_build:
-                raise e
+        self._remote = manifest.RemoteManifest(manifest_path)
+        self.locate.cache_clear()
 
-        if self._auto_fetch:
-            # If auto-fetch is active, try to auto-download the newest and best possible match
-            try:
-                data = self.download(item_id, **kwargs)
-                return self._local.get_path(data)
-            except exceptions.BaseAssetException as e:
-                if not self._auto_build:
-                    raise e
-
-        if self._auto_build:
-            # If auto-build is active, and all other options have failed, try to build the asset
-            data = self.build(item_id, **kwargs)
-            return self._local.get_path(data)
-
-    def download(self, item_id, save=True, **kwargs) -> dict:
-        """Fetch a file from the remote repository to the local cache directory, and update the local manifest"""
-        self._remote.load()  # Load manifest (if not already loaded)
-        remote_record = self._remote.locate(item_id, **kwargs)
-        url = self._remote.get_path(remote_record)
-        dest = self._local.get_path(remote_record)
-
-        urllib.request.urlretrieve(url, dest)
-
-        # Validate that sha256 of the downloaded file matches the record
-        sha = remote_record['sha256']
-        if not (os.path.isfile(dest) and util._get_file_sha256(dest) != sha):
-            raise exceptions.IntegrityError
-
-        local_record = self._local.add_record(item_id, source_path=dest, **remote_record)
-        if save:
-            # Can turn off auto-save if downloading a batch of records at once
-            self._local.save()
-        return local_record
-
-    # Methods that build assets from scratch
+    # Methods to modify the collection of items in the manager
     def add_recipe(self,
-                   item_id,
-                   source: ty.Callable[['AssetManager', str], ty.Tuple[str, dict]],
+                   item_type,
+                   source: ty.Callable[['AssetManager', str,  str], ty.Tuple[str, dict]],
                    label: str = None,
                    **kwargs):
         """
@@ -157,31 +118,100 @@ class AssetManager:
             that receives the provided args and kwargs, and returns a dict with any tags that should be written to
             the manifest. (eg: "generic build command that can run on a schedule to get newest data releases")
         """
-        self._recipes.add_record(item_id, label=label, check_file=False, source=source, **kwargs)
+        self._recipes.add_record(item_type, label=label, _source=source, **kwargs)
 
-    def build(self, item_id, save=True, **kwargs):
+    # Methods for retrieving an asset (precedence is local copy -> remote download -> build from scratch)
+    @functools.lru_cache()
+    def locate(self, item_type, auto_build=None, auto_fetch=None, **kwargs) -> str:
+        """
+        Find an asset in the local store, and optionally, try to auto-download it
+
+        Return the (local) path to the asset at the end of this process
+        """
+        # Auto build can be overridden for specific method calls. This is useful to avoid infinite loops when checking
+        # "asset already exists" during build.
+        auto_build = auto_build if auto_build is not None else self._auto_build
+        auto_fetch = auto_fetch if auto_fetch is not None else self._auto_fetch
+
+        try:
+            data = self._local.locate(item_type, **kwargs)
+            return self._local.get_path(data)
+        except (exceptions.NoMatchingAsset, exceptions.ManifestNotFound) as e:
+            if not auto_fetch and not auto_build:
+                raise e
+
+        if auto_fetch:
+            # If auto-fetch is active, try to auto-download the newest and best possible match
+            try:
+                data = self.download(item_type, **kwargs)
+                logger.debug('Automatically downloaded asset from remote: {}'.format(item_type))
+                return self._local.get_path(data)
+            except exceptions.BaseAssetException as e:
+                if not auto_build:
+                    raise e
+
+        if auto_build:
+            # If auto-build is active, and all other options have failed, try to build the asset
+            logger.debug('Automatically built asset from recipe: {}'.format(item_type))
+            data = self.build(item_type, **kwargs)
+            return self._local.get_path(data)
+
+        raise exceptions.NoMatchingAsset
+
+    def download(self, item_type, save=True, **kwargs) -> dict:
+        """Fetch a file from the remote repository to the local cache directory, and update the local manifest"""
+        self._remote.load()  # Load manifest (if not already loaded)
+        remote_record = self._remote.locate(item_type, **kwargs)
+        url = self._remote.get_path(remote_record)
+        dest = self._local.get_path(remote_record)
+
+        urllib.request.urlretrieve(url, dest)
+
+        # Validate that sha256 of the downloaded file matches the record
+        sha = remote_record['_sha256']
+        if not os.path.isfile(dest) or util.get_file_sha256(dest) != sha:
+            raise exceptions.IntegrityError
+
+        # Since we are downloading directly to the cache dir, we don't need to move or copy the file, and the remote
+        #   manifest has already provided us with the appropriate metadata info
+        local_record = self._local.add_record(item_type, source_path=dest, **remote_record)
+        if save:
+            # Can turn off auto-save if downloading a batch of records at once
+            self._local.save()
+        return local_record
+
+    def build(self, item_type, save=True, **kwargs) -> dict:
         """
         Build a specified asset. This is a very crude build system and is not intended to handle nested
             dependencies, multi-file builds, etc. It is assumed the function can operate completely from within
             a temp folder and that that folder can be cleaned up when done.
         """
-        recipe = self._recipes.locate(item_id, **kwargs)
-        recipe_func = recipe['source']
-        try:
-            out_fn, build_meta = recipe_func(self, item_id, **kwargs)
-        except exceptions.AssetAlreadyExists:
-            # The recipe function can raise "asset already exists" to interrupt the build step. It has access to the
-            #   manager object to see what files already exist. A very abusable feature.
-            # This will fail if the manifest does not find such a matching asset present locally
-            return self._local.locate(item_id, **kwargs)
+        recipe = self._recipes.locate(item_type, **kwargs)
+        recipe_func = recipe['_source']
 
-        if not os.path.isfile(out_fn):
-            raise exceptions.IntegrityError
+        # When building "all recipes", the source (a function) might get passed as a kwarg. Remove it from the
+        #   list of "custom tags"- it's a "system-defined key" and not part of the metadata that goes in the manifest
+        kwargs.pop('_source', None)
 
-        # The build is described by the options we pass in (like "genome_build"), and also by any other metadata
-        #   calculated during the process (eg "db_snp_newest_version")
-        build_description = {**kwargs, **build_meta}
-        local_record = self._local.add_record(item_id, source_path=out_fn, move_file=True, **build_description)
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            # All build steps are automatically given a temporary working folder that will be cleaned up when done
+            try:
+                # TODO: Currently we do not provide a mechanism to force rebuild, except to manually edit the local
+                #   registry to remove the record
+                out_fn, build_meta = recipe_func(self, item_type, tmpdirname, **kwargs)
+            except exceptions.AssetAlreadyExists:
+                # The recipe function can raise "asset already exists" to interrupt the build step.
+                # This will fail if the manifest does not find such a matching asset present locally
+                return self._local.locate(item_type, **kwargs)
+
+            if not os.path.isfile(out_fn):
+                raise exceptions.IntegrityError
+
+            # The build is described by the options we pass in (like "genome_build"), and also by any other metadata
+            #   calculated during the process (eg "db_snp_newest_version")
+            build_description = {**kwargs, **build_meta}
+            local_record = self._local.add_record(item_type, source_path=out_fn, move_file=True, **build_description)
+
         if save:
             # Can turn off auto-save if downloading a batch of records at once
             self._local.save()
