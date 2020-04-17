@@ -14,6 +14,9 @@ from filefetcher import AssetCLI, AssetManager, manager
 SAMPLE_FILE = os.path.join(os.path.dirname(__file__), 'data', 'sample_manifest.json')
 
 # This example is optimized for testing in a local environment, so we'll use a simple local server url
+# The show and build commands can be tested directly as is. To test "download" functionality, start a server in the
+# test data folder, and run the CLI with a manual "local cache" location, eg:
+#       $ ./manual_cli.py --local /Users/you/deleteme/manifest.json download --all
 asset_manager = AssetManager('mypackage', 'http://127.0.0.1:8080/sample_manifest.json', local_manifest=SAMPLE_FILE)
 
 

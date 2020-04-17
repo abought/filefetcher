@@ -46,6 +46,8 @@ class AssetCLI:
         download_parser = subparsers.add_parser('download', help='Download the specified assets (pre-built)')
         add_common(download_parser)
         download_parser.set_defaults(func=self.download_command)
+        download_parser.add_argument('--no-update', dest='no_update', default=False, action='store_true',
+                                     help='Skip downloading of assets that already exist locally')
 
         build_parser = subparsers.add_parser('build', help='Build the specified assets from a recipe')
         add_common(build_parser)
@@ -124,8 +126,14 @@ class AssetCLI:
             sys.exit("No matching items found.")
 
         for record in records:
-            self._manager.download(record['_type'], **record)
-            print('Successfully downloaded file: {}'.format(record['_path']))
+            try:
+                self._manager.download(record['_type'], **record)
+                print('Successfully downloaded file: {}'.format(record['_path']))
+            except exceptions.ImmutableManifestError as e:
+                if args.no_update:
+                    print('Asset already exists; will not download: {}'.format(record['_path']))
+                else:
+                    raise e
 
         if len(records) > 1:
             print('All files successfully downloaded. Thank you.')
