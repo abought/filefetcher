@@ -143,10 +143,6 @@ class LocalManifest(ManifestBase):
     """
     Track a list of all packages that exist locally (eg have been created or downloaded at any time)
     """
-
-    def __init__(self, base_path, *args, filename='manifest.json', **kwargs):
-        super(LocalManifest, self).__init__(base_path, *args, filename=filename, **kwargs)
-
     def get_path(self, basename):
         """Get the path for a file record"""
         if isinstance(basename, dict):
@@ -184,9 +180,10 @@ class RemoteManifest(ManifestBase):
     """
     Track a list of all packages currently available for download, according to a remote server
     """
-
-    def __init__(self, base_path, *args, filename='manifest.json', **kwargs):
-        super(RemoteManifest, self).__init__(base_path, *args, filename=filename, **kwargs)
+    def __init__(self, *args, **kwargs):
+        super(RemoteManifest, self).__init__(*args, **kwargs)
+        if not self._base_path.endswith('/'):
+            self._base_path += '/'
 
     def get_path(self, basename):
         if isinstance(basename, dict):

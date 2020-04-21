@@ -82,3 +82,16 @@ def test_some_manifests_are_immutable(tmpdir):
 
     with pytest.raises(exceptions.ImmutableManifestError):
         recipe.save()
+
+
+def test_remote_manifest_urlpaths():
+    # Regression test for bad url generation on subfolders (for urljoin, trailing slashes matter!)
+    remote_in_child_folder = manifest.RemoteManifest('https://site.example/assets/manifest.json')
+    fake_record = {'_path': '123_filename.json'}
+    child_path = remote_in_child_folder.get_path(fake_record)
+    assert child_path == 'https://site.example/assets/123_filename.json'
+
+    remote_in_root_folder = manifest.RemoteManifest('https://site.example/manifest.json')
+    fake_record = {'_path': '123_filename.json'}
+    child_path = remote_in_root_folder.get_path(fake_record)
+    assert child_path == 'https://site.example/123_filename.json'
