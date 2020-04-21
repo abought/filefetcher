@@ -10,7 +10,7 @@ with open(os.path.join(here, 'README.md'), encoding='utf-8') as f:
 
 setup(
     name='filefetcher',
-    version='0.1.1',
+    version='0.1.2',
     packages=find_packages(exclude=['docs', 'tests', 'venv']),
     url='https://github.com/abought/filefetcher',
     license='',
